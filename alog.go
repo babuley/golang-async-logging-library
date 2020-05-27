@@ -42,26 +42,17 @@ func New(w io.Writer) *Alog {
 // Start begins the message loop for the asynchronous logger. It should be initiated as a goroutine to prevent
 // the caller from being blocked.
 func (al Alog) Start() {
-	exit := false
-	var wg sync.WaitGroup
+	wg := &sync.WaitGroup{}
+loop:
 	for {
 		select {
-		case msg := <-al.MessageChannel():
-			{
-				go func(msg string) {
-					wg.Add(1)
-					al.write(msg, &wg)
-				}(msg)
-			}
+		case msg := <-al.msgCh:
+			wg.Add(1)
+			go al.write(msg, wg)
 		case <-al.shutdownCh:
-			{
-				wg.Wait()
-				al.shutdown()
-				exit = true
-			}
-		}
-		if exit {
-			break
+			wg.Wait()
+			al.shutdown()
+			break loop
 		}
 	}
 }
@@ -74,16 +65,16 @@ func (al Alog) formatMessage(msg string) string {
 }
 
 func (al Alog) write(msg string, wg *sync.WaitGroup) {
-	m := al.formatMessage(msg)
+	defer wg.Done()
 	al.m.Lock()
-	_, err := al.dest.Write([]byte(m))
+	defer al.m.Unlock()
+
+	_, err := al.dest.Write([]byte(al.formatMessage(msg)))
 	if err != nil {
 		go func(err error) {
-			al.ErrorChannel() <- err
+			al.errorCh <- err
 		}(err)
 	}
-	wg.Done()
-	al.m.Unlock()
 }
 
 func (al Alog) shutdown() {
@@ -100,26 +91,14 @@ func (al Alog) MessageChannel() chan string {
 // This channel should always be monitored in some way to prevent deadlock goroutines from being generated
 // when errors occur.
 func (al Alog) ErrorChannel() chan error {
-	return al.ErrorChannel()
+	return al.errorCh
 }
 
 // Stop shuts down the logger. It will wait for all pending messages to be written and then return.
 // The logger will no longer function after this method has been called.
 func (al Alog) Stop() {
 	al.shutdownCh <- struct{}{}
-	exit := false
-	for {
-		select {
-		case <-al.shutdownCompleteCh:
-			{
-				exit = true
-
-			}
-		}
-		if exit {
-			break
-		}
-	}
+	<-al.shutdownCompleteCh
 }
 
 // Write synchronously sends the message to the log output
